@@ -4,6 +4,13 @@ app_publisher = "mostafa"
 app_description = "jibble_integration"
 app_email = "mostafa.taha@pharaonx.com"
 app_license = "mit"
+scheduler_events = {
+    "cron": {
+        "*/10 * * * *": [
+            "jibble_integration.jibble_api.sync_attendance.process_and_store_data"
+        ]
+    }
+}
 
 # Apps
 # ------------------
