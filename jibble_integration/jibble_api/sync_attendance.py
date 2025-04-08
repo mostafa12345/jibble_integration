@@ -209,7 +209,7 @@ def process_and_store_data():
         # ✅ Fetch email with manual fallback applied in `fetch_employees_from_frappe()`
         email = email_dict.get(employee_name)
 
-        attendance_doc = create_or_update_attendance(employee_name, date_today)
+        attendance_doc = None
 
         working_hour = 0  # ✅ Always initialize working_hour
 
