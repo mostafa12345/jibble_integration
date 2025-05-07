@@ -3,15 +3,20 @@ import frappe
 from datetime import datetime
 import pytz
 
-local_tz = pytz.timezone('Africa/Cairo')  # Set timezone
+local_tz = pytz.timezone('Africa/Cairo')
 
-# Function to get the access token
+def log(msg, title="✅ Jibble Sync"):
+    msg = str(msg)
+    if len(msg) > 1000:
+        msg = msg[:997] + '...'
+    if len(title) > 140:
+        title = title[:137] + '...'
+    frappe.log_error(msg, title)
+
 def get_access_token():
     settings = frappe.get_single("Jibble API Settings")
     client_id = settings.client_id
     client_secret = settings.get_password('client_secret')
-
-
     url = 'https://identity.prod.jibble.io/connect/token'
     headers = {'Accept': 'application/json', 'Content-Type': 'application/x-www-form-urlencoded'}
     data = {
@@ -20,208 +25,138 @@ def get_access_token():
         'client_secret': client_secret
     }
     response = requests.post(url, headers=headers, data=data)
-    
-
     if response.status_code == 200:
         return response.json().get('access_token')
     else:
-        frappe.log_error(f"Failed to get access token: {response.text[:100]}...", "Jibble API Error")
+        log(f"Failed to get access token: {response.text}", "Jibble Auth Error")
         return None
 
-# Function to fetch employees from Jibble API
-def fetch_employees():
+def fetch_time_entries(date, token):
+    url = f"https://time-tracking.prod.jibble.io/v1/TimeEntries?$count=true&$expand=person($select=id,fullName)&$filter=(belongsToDate eq {date} and status ne 'Archived')&$orderby=time asc"
+    headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
+    response = requests.get(url, headers=headers)
+    if response.status_code == 200:
+        return response.json().get('value', [])
+    else:
+        log(f"Failed to fetch time entries: {response.text[:300]}", "Jibble API Error")
+        return []
+
+def fetch_user_profiles(token):
+    url = "https://workspace.prod.jibble.io/v1/People"
+    headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
+    response = requests.get(url, headers=headers)
+    if response.status_code == 200:
+        return response.json().get("value", [])
+    else:
+        log(f"Failed to fetch user profiles: {response.text[:300]}", "Jibble API Error")
+        return []
+
+def fetch_attendance_data(date):
     token = get_access_token()
     if not token:
         return []
 
-    url = 'https://workspace.prod.jibble.io/v1/People'
-    headers = {'Authorization': f'Bearer {token}'}
-    response = requests.get(url, headers=headers)
+    profiles = fetch_user_profiles(token)
+    time_entries = fetch_time_entries(date, token)
 
-    if response.status_code == 200:
-        return response.json().get('value', [])
-    else:
-        frappe.log_error(f"Failed to fetch employees: {response.text[:100]}...", "Jibble API Error")
-        return []
+    person_email_map = {person.get("id"): person.get("email") for person in profiles if person.get("id")}
+    person_name_map = {person.get("id"): person.get("fullName") for person in profiles if person.get("id")}
 
-# Function to fetch locations from Jibble API
-def fetch_locations():
-    token = get_access_token()
-    if not token:
-        return []
+    for entry in time_entries:
+        pid = entry.get("personId")
+        entry["email"] = person_email_map.get(pid)
+        entry["fallback_name"] = person_name_map.get(pid).strip().lower() if person_name_map.get(pid) else None
 
-    url = 'https://workspace.prod.jibble.io/v1/Locations?%24filter=status%20ne%20%27Archived%27&%24select=id,name,code,address,geoFence,coordinates'
-    headers = {'Authorization': f'Bearer {token}'}
-    response = requests.get(url, headers=headers)
+    return time_entries
 
-    if response.status_code == 200:
-        return response.json().get('value', [])
-    else:
-        frappe.log_error(f"Failed to fetch locations: {response.text[:100]}...", "Jibble API Error")
-        return []
+def fetch_employee_map():
+    employees = frappe.get_all("Employee", fields=["name", "user_id", "employee_name"])
+    email_map = {emp["user_id"]: emp["name"] for emp in employees if emp.get("user_id")}
+    name_map = {emp["employee_name"].strip().lower(): emp["name"] for emp in employees if emp.get("employee_name")}
+    user_email_map = {emp["name"]: emp["user_id"] for emp in employees if emp.get("name") and emp.get("user_id")}
+    return email_map, name_map, user_email_map
 
-# Function to create a location dictionary for quick lookup
-def create_location_dict(locations):
-    return {loc['id']: loc['coordinates'] for loc in locations if loc.get('coordinates')}
-
-# Function to parse timestamps safely
-def parse_timestamp(timestamp):
+def parse_timestamp(ts):
     try:
-        if '.' in timestamp:
-            timestamp = timestamp.split('.')[0]  # Remove milliseconds
-        if 'Z' in timestamp:
-            timestamp = timestamp.replace('Z', '')  # Remove 'Z' indicating UTC
-        dt_utc = datetime.strptime(timestamp, '%Y-%m-%dT%H:%M:%S').replace(tzinfo=pytz.UTC)
-        return dt_utc
-    except ValueError as e:
-        frappe.log_error(f"Invalid timestamp {timestamp}: {e}", "Jibble Timestamp Error")
+        ts = ts.split('.')[0].replace('Z', '')
+        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=pytz.UTC)
+    except Exception as e:
+        log(f"Timestamp error: {ts} | {e}", "Jibble Timestamp Error")
         return None
 
-# Function to fetch attendance data from Jibble API
-def fetch_attendance_data_for_day(date):
-    token = get_access_token()
-    if not token:
-        return []
-
-    url = f'https://time-tracking.prod.jibble.io/v1/TimeEntries?$count=true&$expand=person($select=id,fullname)&$filter=(belongsToDate eq {date} and status ne \'Archived\')&$orderby=time asc'
-    headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json', 'Content-Type': 'application/json'}
-    response = requests.get(url, headers=headers)
-
-    if response.status_code == 200:
-        return response.json().get('value', [])
-    else:
-        frappe.log_error(f"Failed to fetch attendance data: {response.text[:100]}...", "Jibble API Error")
-        return []
-
-# Function to fetch employee emails from Frappe
-def fetch_employees_from_frappe():
-    employee_list = frappe.get_all('Employee', fields=['employee_name', 'user_id'])
-    email_dict = {emp['employee_name'].strip().lower(): emp['user_id'] for emp in employee_list if emp['user_id']}
-
-    # Manual fallback for missing users
-    manual_emails = {
-        'mahmoud abdelghaffar': 'mahmoud.abdelghaffar@pharaonx.com',
-        'mostafa taha amer': 'mostafa.taha@pharaonx.com',
-        'mahmoud halool': 'mahmoud.halool@pharaonx.com',
-        'ahmed rashid': 'ahmed.rashid@pharaonx.com'
-    }
-
-    # Merge manual emails directly into email_dict
-    for name, email in manual_emails.items():
-        email_dict[name] = email  # Always override to ensure manual emails are set
-
-    return email_dict
-
-# Function to create or update Attendance for an employee
-def create_or_update_attendance(employee_name, attendance_date):
-    existing_attendance = frappe.get_all(
-        'Attendance',
-        filters={'employee': employee_name, 'attendance_date': attendance_date},
-        fields=['name']
-    )
-
-    if existing_attendance:
-        return frappe.get_doc('Attendance', existing_attendance[0]['name'])  # Return existing attendance record
-
-    attendance_doc = frappe.get_doc({
-        'doctype': 'Attendance',
-        'employee': employee_name,
-        'attendance_date': attendance_date,
-        'status': 'Present'
-    })
-    attendance_doc.insert(ignore_permissions=True)
-    attendance_doc.submit()
-    frappe.db.commit()
-
-    return attendance_doc
-
-# Function to create Check-in/Check-out log linked to Attendance
-def create_checkin_or_checkout(employee_id, employee_name, timestamp, log_type, attendance_doc, working_hour, location, email):
+def create_checkin(employee_id, email, timestamp, log_type, working_hours, location, user_email_map):
     dt_utc = parse_timestamp(timestamp)
     if not dt_utc:
-        return None
+        return
 
     dt_local = dt_utc.astimezone(local_tz)
-    formatted_time = dt_local.strftime('%Y-%m-%d %H:%M:%S')
-    
-    # 🔹 If location is missing for CHECK-OUT, fetch the last check-in location
-    if not location and log_type.upper() == "OUT":
-        last_checkin = frappe.get_all(
-            'Employee Checkin',
-            filters={'employee': employee_name, 'log_type': 'IN'},
-            order_by="time desc",
-            fields=['latitude', 'longitude'],
-            limit=1
-        )
-        if last_checkin:
-            location = {"latitude": last_checkin[0]['latitude'], "longitude": last_checkin[0]['longitude']}
+    time_str = dt_local.strftime("%Y-%m-%d %H:%M:%S")
 
     if not location:
-        location = {"latitude": 29.9677640, "longitude": 31.2508160}
+        location = {"latitude": 29.967764, "longitude": 31.250816}
 
-    existing_log = frappe.get_all(
-        'Employee Checkin',
-        filters={'employee': employee_name, 'time': formatted_time, 'log_type': log_type},
-        fields=['name']
-    )
-
-    if existing_log:
-        return None
-
-    new_log = frappe.get_doc({
-        'doctype': 'Employee Checkin',
-        'employee': employee_name,
-        'time': formatted_time,
-        'log_type': log_type.upper(),
-        'working_hour': working_hour,
-        'latitude': location.get('latitude', 29.9677640),
-        'longitude': location.get('longitude', 31.2508160),
-        'employee_email': email,  # ✅ Always set the email (manual or fetched)
-        'attendance': attendance_doc.name if attendance_doc else None
+    exists = frappe.get_all("Employee Checkin", filters={
+        "employee": employee_id,
+        "time": time_str,
+        "log_type": log_type.upper()
     })
 
-    new_log.insert(ignore_permissions=True)
+    if exists:
+        return
+
+    final_email = email or user_email_map.get(employee_id)
+
+    doc = frappe.get_doc({
+        "doctype": "Employee Checkin",
+        "employee": employee_id,
+        "time": time_str,
+        "log_type": log_type.upper(),
+        "working_hour": working_hours,
+        "latitude": location.get("latitude"),
+        "longitude": location.get("longitude"),
+        "employee_email": final_email
+    })
+
+    doc.insert(ignore_permissions=True)
     frappe.db.commit()
 
-
-    return new_log
-
-# Main function to process attendance data
 def process_and_store_data():
-    email_dict = fetch_employees_from_frappe()
-    locations = fetch_locations()
-    location_dict = create_location_dict(locations)
+    date_today = datetime.today().strftime("%Y-%m-%d")
+    entries = fetch_attendance_data(date_today)
+    if not entries:
+        log("No entries fetched from Jibble.", "Fetched 0 entries")
+        return
 
-    date_today = datetime.today().strftime('%Y-%m-%d')
-    attendance_data = fetch_attendance_data_for_day(date_today)
+    email_map, name_map, user_email_map = fetch_employee_map()
+    checkin_map = {}
 
-    last_check_in = {}
+    for entry in entries:
+        email = entry.get("email")
+        fallback_name = entry.get("fallback_name")
 
-    for entry in attendance_data:
-        employee_name = entry["person"]["fullName"].strip().lower()
-        person_id = entry["person"]["id"]
-        log_type = entry["type"]
-        timestamp = entry["time"]
+        employee_id = email_map.get(email)
+        if not employee_id and fallback_name:
+            employee_id = name_map.get(fallback_name)
 
-        location_id = entry.get('locationId')
-        location = location_dict.get(location_id, None)
+        if not employee_id:
+            log(f"No employee match for: Email={email}, Name={fallback_name}", "Missing Employee")
+            continue
 
-        # ✅ Fetch email with manual fallback applied in `fetch_employees_from_frappe()`
-        email = email_dict.get(employee_name)
+        log_type = entry.get("type")
+        timestamp = entry.get("time")
+        location = entry.get("coordinates", {})
 
-        attendance_doc = None
-
-        working_hour = 0  # ✅ Always initialize working_hour
+        working_hour = 0
+        person_id = entry.get("personId")
 
         if log_type == "In":
-            last_check_in[person_id] = entry
-        elif log_type == "Out" and person_id in last_check_in:
-            check_in_time = parse_timestamp(last_check_in.pop(person_id)['time'])
+            checkin_map[person_id] = timestamp
+        elif log_type == "Out" and person_id in checkin_map:
+            check_in_time = parse_timestamp(checkin_map[person_id])
             check_out_time = parse_timestamp(timestamp)
             if check_in_time and check_out_time:
                 working_hour = (check_out_time - check_in_time).total_seconds() / 3600
 
-        create_checkin_or_checkout(person_id, employee_name, timestamp, log_type, attendance_doc, working_hour, location, email)
+        create_checkin(employee_id, email, timestamp, log_type, working_hour, location, user_email_map)
 
-process_and_store_data()
-
+    log("✅ Jibble Sync completed successfully", "Success")
