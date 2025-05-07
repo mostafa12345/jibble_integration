@@ -7,14 +7,21 @@ local_tz = pytz.timezone('Africa/Cairo')  # Set timezone
 
 # Function to get the access token
 def get_access_token():
+    settings = frappe.get_single("Jibble API Settings")
+    client_id = settings.client_id
+    client_secret = settings.get_password('client_secret')
+
+
     url = 'https://identity.prod.jibble.io/connect/token'
     headers = {'Accept': 'application/json', 'Content-Type': 'application/x-www-form-urlencoded'}
     data = {
         'grant_type': 'client_credentials',
-        'client_id': 'e70b5bab-4de8-4b37-845e-1ec47cb2dd03',
-        'client_secret': 'lSNkMwc-A7qrdR7Fo0GAB1jkwOiCsQhCxrfID4rJFYVi86Io'
+        'client_id': client_id,
+        'client_secret': client_secret
     }
     response = requests.post(url, headers=headers, data=data)
+    
+
     if response.status_code == 200:
         return response.json().get('access_token')
     else:
@@ -123,6 +130,7 @@ def create_or_update_attendance(employee_name, attendance_date):
         'status': 'Present'
     })
     attendance_doc.insert(ignore_permissions=True)
+    attendance_doc.submit()
     frappe.db.commit()
 
     return attendance_doc
@@ -135,8 +143,8 @@ def create_checkin_or_checkout(employee_id, employee_name, timestamp, log_type, 
 
     dt_local = dt_utc.astimezone(local_tz)
     formatted_time = dt_local.strftime('%Y-%m-%d %H:%M:%S')
-
-    # Ensure location is retained from check-in if missing during check-out
+    
+    # 🔹 If location is missing for CHECK-OUT, fetch the last check-in location
     if not location and log_type.upper() == "OUT":
         last_checkin = frappe.get_all(
             'Employee Checkin',
@@ -171,8 +179,10 @@ def create_checkin_or_checkout(employee_id, employee_name, timestamp, log_type, 
         'employee_email': email,  # ✅ Always set the email (manual or fetched)
         'attendance': attendance_doc.name if attendance_doc else None
     })
+
     new_log.insert(ignore_permissions=True)
     frappe.db.commit()
+
 
     return new_log
 
@@ -196,13 +206,21 @@ def process_and_store_data():
         location_id = entry.get('locationId')
         location = location_dict.get(location_id, None)
 
+        # ✅ Fetch email with manual fallback applied in `fetch_employees_from_frappe()`
         email = email_dict.get(employee_name)
 
-        attendance_doc = create_or_update_attendance(employee_name, date_today)
+        attendance_doc = None
 
-        working_hour = 0  
+        working_hour = 0  # ✅ Always initialize working_hour
+
+        if log_type == "In":
+            last_check_in[person_id] = entry
+        elif log_type == "Out" and person_id in last_check_in:
+            check_in_time = parse_timestamp(last_check_in.pop(person_id)['time'])
+            check_out_time = parse_timestamp(timestamp)
+            if check_in_time and check_out_time:
+                working_hour = (check_out_time - check_in_time).total_seconds() / 3600
 
         create_checkin_or_checkout(person_id, employee_name, timestamp, log_type, attendance_doc, working_hour, location, email)
 
 process_and_store_data()
-	
