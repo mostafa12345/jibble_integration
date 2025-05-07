@@ -32,9 +32,6 @@ A seamless integration between **[Jibble](https://www.jibble.io/)** and **Frappe
    - Add `user_id` to **Search Fields**
 3. This allows mapping check-ins using the employee’s email from Jibble
 
-🖼️ *Example:*  
-![Shift Type Screenshot](https://amunet.pharaonx.com/files/b7b16e2e-0e3b-451a-9fb6-6b1d660ae2c1.png)  
-![Employee DocType Screenshot](https://amunet.pharaonx.com/files/57844203-50a6-42dd-b5a6-d6c1d877136b.png)
 
 ---
 
@@ -43,5 +40,8 @@ A seamless integration between **[Jibble](https://www.jibble.io/)** and **Frappe
 ### 📥 1. Clone the App
 
 ```bash
-cd ~/frappe-bench/apps
-git clone https://github.com/mostafa12345/jibble_integration.git
+cd ~/frappe-bench
+bench get-app jibble_integration https://github.com/mostafa12345/jibble_integration
+bench --site your-site-name install-app jibble_integration
+Replace your-site-name with your site
+bench restart
